@@ -41,13 +41,22 @@ interface AutomationStep {
   element: any;
 }
 
-// Function to handle the generateAutomationSteps tool call
 async function handleGenerateAutomationSteps(args: any, elements: any[]) {
   console.log('Starting handleGenerateAutomationSteps with args:', JSON.stringify(args, null, 2));
   console.log('Number of elements available:', elements.length);
   
   try {
-    const steps = args.steps;
+    // Parse steps if they come as a JSON string
+    let steps = args.steps;
+    if (typeof steps === 'string') {
+      try {
+        steps = JSON.parse(steps);
+      } catch (parseError) {
+        console.error('Failed to parse steps:', parseError);
+        throw new Error('Invalid steps format');
+      }
+    }
+
     console.log('Received steps:', JSON.stringify(steps, null, 2));
 
     if (!Array.isArray(steps)) {
@@ -55,8 +64,6 @@ async function handleGenerateAutomationSteps(args: any, elements: any[]) {
       throw new Error('Steps must be an array');
     }
 
-    console.log('Starting step validation for', steps.length, 'steps');
-    // Validate each step
     const validatedSteps = steps.map((step, index) => {
       console.log(`Validating step ${index + 1}:`, JSON.stringify(step, null, 2));
 
@@ -71,21 +78,18 @@ async function handleGenerateAutomationSteps(args: any, elements: any[]) {
         console.log('Available localIds:', elements.map(el => el.localId));
         throw new Error(`Invalid elementId: ${step.elementId}`);
       }
-      console.log(`Found matching element for localId ${step.elementId}:`, JSON.stringify(element, null, 2));
 
       if (!['click', 'type', 'select'].includes(step.action)) {
         console.error('Invalid action:', step.action);
         throw new Error(`Invalid action: ${step.action}`);
       }
 
-      const validatedStep = {
+      return {
         action: step.action,
         elementId: step.elementId,
         value: step.value || '',
         element,
       };
-      console.log(`Step ${index + 1} validated:`, JSON.stringify(validatedStep, null, 2));
-      return validatedStep;
     });
 
     console.log('All steps validated successfully:', JSON.stringify(validatedSteps, null, 2));
@@ -114,86 +118,22 @@ export default {
 
       console.log('Processing request with goal:', data.goal);
       console.log('Screenshot dimensions:', data.screenshot?.width, 'x', data.screenshot?.height);
-      console.log('Screenshot data length:', data.screenshot?.data?.length);
       console.log('Number of elements:', data.elements.length);
 
-      // Create HTML representation of elements
-      const elementsHtml = elements.map((el) => {
-        const attributes = Object.entries(el.attributes)
-          .filter(([key]) => key !== 'text')
-          .map(([key, value]) => `${key}="${value}"`)
-          .join(' ');
-        return `<${el.type} data-local-id="${el.localId}" ${attributes}>${el.text || ''}</${el.type}>`;
-      }).join('\n');
-
-      console.log('Generated HTML representation of elements');
-
-      // First, use Llama Vision to analyze the interface
-      console.log('Calling Llama Vision model...');
-      const visionResponse = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
-        messages: [
-          {
-            role: 'user',
-            content: `Analyze this interface focusing on these aspects:
-1. For each unique element with data-local-id, describe:
-   - Its localId (number)
-   - Its type (input/button)
-   - Its purpose
-   - Any placeholder or text content
-
-Note: Each localId should only appear once. If you see duplicates, they are the same element.
-
-Current goal: ${data.goal}
-
-Available elements:
-${elements.map(el => 
-  `localId=${el.localId} | ${el.tag} | type="${el.type}" | text="${el.text}" | placeholder="${el.placeholder || ''}"`)
-  .join('\n')}
-`,
-            image: data.screenshot.data
-          }
-        ],
-        max_tokens: 1000,
-        temperature: 0.2,
-        stream: false
-      });
-
-      console.log('Vision model response received');
-      console.log('Vision analysis:', visionResponse);
-
-      // Parse the vision response
-      let visionDescription = '';
-      if (typeof visionResponse === 'string') {
-        visionDescription = visionResponse;
-      } else if (typeof visionResponse === 'object' && visionResponse !== null) {
-        if ('response' in visionResponse) {
-          visionDescription = visionResponse.response;
-        } else if ('text' in visionResponse) {
-          visionDescription = visionResponse.text;
-        } else {
-          console.log('Unexpected vision response structure:', JSON.stringify(visionResponse, null, 2));
-          visionDescription = JSON.stringify(visionResponse);
-        }
-      }
-
-      console.log('Using vision description for automation');
-
-      // Track if we got a valid tool response
       let toolResponse: Response | null = null;
 
-      // Use Hermes model with tools to generate automation steps
       await runWithTools(
         env.AI,
-        '@hf/nousresearch/hermes-2-pro-mistral-7b',
+        '@cf/meta/llama-3.2-11b-vision-instruct',
         {
           messages: [
             {
               role: 'system',
               content: `You are an automation expert that MUST use the generateAutomationSteps tool to generate automation steps.
 
-              IMPORTANT RULES: 
-              1. Use the exact localId numbers from the list above
-              2. Do not make up IDs
+              IMPORTANT RULES:
+              1. Analyze the screenshot and elements to understand the interface
+              2. Use the exact localId numbers from the provided elements
               3. Only use "type" action for input fields
               4. Only use "click" action for buttons
               5. Focus on achieving the goal
@@ -206,15 +146,13 @@ ${elements.map(el =>
               role: 'user',
               content: `Goal: "${data.goal}"
 
-              Vision Analysis:
-              ${visionDescription}
-
               Available elements:
               ${elements.map((el) => `- localId: ${el.localId}, type: ${el.type}, text: "${el.text}", tag: ${el.tag}, placeholder: "${el.placeholder || ''}"`).join('\n')}
 
               Use the generateAutomationSteps tool to create steps that achieve this goal.
               DO NOT describe the steps in text.
-              ONLY use the tool to generate steps.`
+              ONLY use the tool to generate steps.`,
+              image: data.screenshot.data
             }
           ],
           tools: [
@@ -251,7 +189,6 @@ ${elements.map(el =>
                 required: ['steps']
               },
               function: async (args: any) => {
-                // Store the validated steps response
                 const validatedSteps = await handleGenerateAutomationSteps(args, elements);
                 toolResponse = new Response(JSON.stringify({ steps: validatedSteps }), {
                   headers: {
@@ -259,11 +196,13 @@ ${elements.map(el =>
                     'Access-Control-Allow-Origin': '*',
                   },
                 });
-                // Return success to model
                 return { success: true };
               }
             }
-          ]
+          ],
+          max_tokens: 1000,
+          temperature: 0.2,
+          stream: false
         },
         {}
       );
