@@ -1,0 +1,6 @@
+name = "automation-worker"
+main = "src/worker.ts"
+compatibility_date = "2024-02-20"
+
+[ai]
+binding = "AI"
