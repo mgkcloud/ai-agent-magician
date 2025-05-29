@@ -1,4 +1,4 @@
-# Automation Worker
+# Automation Worker.
 
 This Cloudflare Worker processes screenshots and user goals to generate automation steps using AI models.
 
